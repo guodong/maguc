@@ -1,0 +1,67 @@
+#include "stdparser"
+
+const bit<16> TYPE_MYTUNNEL = 0x1212;
+const bit<16> TYPE_IPV4 = 0x800;
+
+header myTunnel_t {
+    bit<16> proto_id;
+    bit<16> dst_id;
+}
+
+struct headers {
+    ethernet_t   eth;
+    myTunnel_t   myTunnel;
+    ipv4_t       ipv4;
+}
+
+parser MyParser(packet_in packet,
+                out headers hdr,
+                inout metadata meta,
+                inout standard_metadata_t standard_metadata) {
+
+    state start {
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            TYPE_MYTUNNEL: parse_myTunnel;
+            TYPE_IPV4: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_myTunnel {
+        packet.extract(hdr.myTunnel);
+        transition select(hdr.myTunnel.proto_id) {
+            TYPE_IPV4: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition accept;
+    }
+
+}
+
+hostTable: Map[Ipv4, SwPort]
+ipToMac: Map[Ipv4, Mac]
+tunnelToPort: Map[Int, SwPort]
+
+processing_rule decttl(inout pkt: Packet) {
+    pkt.hdr.ipv4.ttl--
+}
+
+@policy(parser=Parser, label="default")
+path_control pc(in pkt: Packet, out path: Path, out rule: ProcRule) {
+    if (pkt.hdr.myTunnel.isValid()) {
+        path = shortestPath(pkt.ingestion, tunnelToPort(pkt.hdr.myTunnel.dst_id))
+    } else {
+        pkt.hdr.eth.dst = ipToMac(pkt.hdr.ipv4.dst)
+        path = shortestPath(pkt.ingestion, hostTable(pkt.hdr.ipv4.dst))
+    }
+    rule = 'decttl*'
+}

@@ -1,0 +1,30 @@
+// header and parser are omitted
+// this program achieves basic forwarding with port filter
+// client <-> network <-> server
+global map<ipv4_t, swport_t> host_table = DS.load(‘host_table’)
+
+path_control server_pc(in packet_t pkt, out path_constraint_t path_constraint, out string processing_rule) {
+  if (pkt.hdr.tcp.src == 80) {
+    path_contraint.waypoints = [pkt.ingestion, FW, host_table[pkt.hdr.ipv4.dst]];
+    path_contraint.resource = min(100m) >> 0
+    processing_rule = ‘dec_ttl*’
+  } else {
+    path_contraint = drop
+  }
+}
+
+path_control client_pc(in packet_t pkt, out path_constraint_t path_constraint, out string processing_rule) {
+  if (pkt.hdr.tcp.dst == 80) { // allow http request from client side
+    path_contraint.waypoints = [pkt.ingestion, FW >> *, host_table[pkt.hdr.ipv4.dst]]
+    path_contraint.resource = max(10m)
+    processing_rule = ‘dec_ttl*’
+  } else {
+    path_contraint = drop
+  }
+}
+threads {
+  ingestion=’client_external_ingress’, program=’client_pc’;
+  ingestion=’server_external_ingress’, program=’server_pc’;
+}
+
+

@@ -1,0 +1,72 @@
+// header and parser are omitted
+map<ipv4_t, swport_t> POP_prefix_to_dst = DS.load(‘POP_prefix_to_dst’)
+map<ipv4_t, swport_t> BB_prefix_to_dst = DS.load(‘BB_prefix_to_dst’)
+map<ipv4_t, swport_t> DC_prefix_to_dst = DS.load(‘DC_prefix_to_dst’)
+map<swport_t, set<swport_t>> POP_ing_to_cache = DS.load(‘POP_ing_to_cache’)
+set<ipv4_t> FB_internet_acl_srcip = DS.load('FB_internet_acl_srcip')
+
+processing_block dec_ttl(inout packet_t<headers_t> pkt) {
+  assert(pkt.hdr.ipv4.ttl > 0);
+  pkt.hdr.ipv4.ttl--;
+}
+
+path_control PR_pc(inout packet_t<headers_t> pkt) {
+  pkt.egress_path = path_to_cache(pkt);
+  pkt.processing_rule = ’dec_ttl*’;
+}
+
+path_control PSW_pc(inout packet_t<headers_t> pkt) {
+  pkt.egress_path = path_ecmp(pkt);
+  pkt.processing_rule = ’dec_ttl*’;
+}
+
+path_control BB_pc(inout packet_t<headers_t> pkt) {
+  pkt.egress_path = path_backbone(pkt)
+  pkt.processing_rule=’dec_ttl*’;
+}
+
+path_control DC_pc(inout packet_t<headers_t> pkt) {
+  pkt.egress_path = path_ecmp(pkt);
+  pkt.processing_rule=’dec_ttl*’;
+}
+
+threads {
+  ingestion=’PR_eingress’, program=’PR_pc’;
+  ingestion=’PSW_eingress’, program=’PSW_pc’;
+  ingestion=’BB_eingress’, program=’BB_pc’;
+  ingestion=’DC_eingress’, program=’DC_pc’;
+}
+
+path_t path_to_cache(in packet_t<headers_t> pkt) {
+  iff (!FB_internet_acl_srcip.contains(pkt.hdr.ipv4.src)) {
+    return drop
+  } else {
+    int id = hash(pkt.hdr.ipv4.*) % len(cache_servers)
+    switch_t target_cache_server = cache_servers[id]
+    path_t path = shortest_path(pkt.ingestion, target_cache_server)
+    path_t path_s = snapshot(path)
+    path_t backup_path = frr(path_s)
+    return any(path >> backup_path)
+  }
+}
+
+path_t path_backbone(in packet_t<headers_t> pkt) {
+  iff (!FB_internet_acl_srcip.contains(pkt.hdr.ipv4.src)) {
+    return drop
+  } else {
+      path_t p = shortest_path(pkt.ingestion, pkt.hdr.ipv4.dst)
+      path_t ps = snapshot(p)
+      path_t b = frr(ps)
+      return any(ps >> b)
+  }
+}
+
+path_t path_ecmp(in packet_t<headers_t> pkt) {
+  iff (!FB_internet_acl_srcip.contains(pkt.hdr.ipv4.src)) {
+    return drop
+  } else {
+    set<path_t> eps = ecmp_paths(pkt.hdr.ipv4.src, pkt.hdr.ipv4.dst)
+    set<path_t> eps_s = snapshot(eps)
+    return any(eps_s)
+  }
+}

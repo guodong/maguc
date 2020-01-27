@@ -1,0 +1,45 @@
+#include "stdparser"
+
+struct headers {
+    ethernet_t   eth;
+    ipv4_t     ipv4;
+}
+
+parser Parser(packet_in packet,
+                out headers hdr,
+                inout metadata meta,
+                inout standard_metadata_t standard_metadata) {
+
+    state start {
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.eth);
+        transition select(hdr.eth.type) {
+            0x800: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition accept;
+    }
+
+}
+
+hostTable: Map[Ipv4, SwPort]
+
+ipToMac: Map[Ipv4, Mac]
+
+processing_rule decttl(inout pkt: Packet) {
+    pkt.hdr.ipv4.ttl--
+}
+
+@policy(parser=Parser, label="default")
+path_control pc(in pkt: Packet, out path: Path, out rule: ProcRule) {
+    pkt.hdr.eth.dst = ipToMac(pkt.hdr.ipv4.dst)
+    path = shortestPath(pkt.ingestion, hostTable(pkt.hdr.ipv4.dst))
+    rule = 'decttl*'
+}

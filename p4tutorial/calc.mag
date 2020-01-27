@@ -1,0 +1,75 @@
+#include "stdparser"
+
+const bit<16> P4CALC_ETYPE = 0x1234;
+const bit<8>  P4CALC_P     = 0x50;   // 'P'
+const bit<8>  P4CALC_4     = 0x34;   // '4'
+const bit<8>  P4CALC_VER   = 0x01;   // v0.1
+const bit<8>  P4CALC_PLUS  = 0x2b;   // '+'
+const bit<8>  P4CALC_MINUS = 0x2d;   // '-'
+const bit<8>  P4CALC_AND   = 0x26;   // '&'
+const bit<8>  P4CALC_OR    = 0x7c;   // '|'
+const bit<8>  P4CALC_CARET = 0x5e;   // '^'
+
+header p4calc_t {
+    bit<8>  p;
+    bit<8>  four;
+    bit<8>  ver;
+    bit<8>  op;
+    bit<32> operand_a;
+    bit<32> operand_b;
+    bit<32> res;
+}
+
+struct headers {
+    ethernet_t   eth;
+    p4calc_t     p4calc;
+}
+
+parser MyParser(packet_in packet,
+                out headers hdr,
+                inout metadata meta,
+                inout standard_metadata_t standard_metadata) {
+
+    state start {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            P4CALC_ETYPE : check_p4calc;
+            default      : accept;
+        }
+    }
+
+    state check_p4calc {
+        transition select(packet.lookahead<p4calc_t>().p,
+        packet.lookahead<p4calc_t>().four,
+        packet.lookahead<p4calc_t>().ver) {
+            (P4CALC_P, P4CALC_4, P4CALC_VER) : parse_p4calc;
+            default                          : accept;
+        }
+    }
+
+    state parse_p4calc {
+        packet.extract(hdr.p4calc);
+        transition accept;
+    }
+}
+
+hostTable: Map[Ipv4, SwPort]
+
+ipToMac: Map[Ipv4, Mac]
+
+processing_rule decttl(inout pkt: Packet) {
+    pkt.hdr.ipv4.ttl--
+}
+
+@policy(parser=Parser, label="default")
+path_control pc(in pkt: Packet, out path: Path, out rule: ProcRule) {
+    switch(pkt.hdr.p4calc.op) {
+        case P4CALC_PLUS: pkt.hdr.p4calc.res = pkt.hdr.p4calc.operand_a + pkt.hdr.p4calc.operand_b
+        case P4CALC_MINUS: pkt.hdr.p4calc.res = pkt.hdr.p4calc.operand_a - pkt.hdr.p4calc.operand_b
+        case P4CALC_AND: pkt.hdr.p4calc.res = pkt.hdr.p4calc.operand_a & pkt.hdr.p4calc.operand_b
+        case P4CALC_OR: pkt.hdr.p4calc.res = pkt.hdr.p4calc.operand_a | pkt.hdr.p4calc.operand_b
+        case P4CALC_CARET: pkt.hdr.p4calc.res = pkt.hdr.p4calc.operand_a ^ pkt.hdr.p4calc.operand_b
+    }
+    swap(pkt.hdr.eth.src, pkt.hdr.eth.dst)
+    path = pkt.ingestion
+}

@@ -1,0 +1,101 @@
+// header and parser are omitted
+// NVGRE vni -> vip -> host ip
+map<vni_t, map<vip_t, hip_t>> vni_table = DS.load(‘vni_table');
+map<ipv4_t, swport_t>[100] host_table = DS.load(‘host_table')
+map<vni_t, switch_t> vni_to_gw = DS.load(‘vni_to_gw')
+list<switch_t> spines = DS.load(‘spines')
+list<switch_t> waypoints = DS.load('waypoints')
+set<ipv4_t> system_ip_table = DS.load('system_ip_table')
+
+processing_block rewrite_dst(inout packet_t<headers_t> pkt) {
+  ipv4_t dst_host_ip = vni_table[pkt.hdr.nvgre.vni][pkt.hdr.inner_ipv4.dst];
+  pkt.hdr.ipv4.dst = dst_host_ip;
+}
+processing_block do_garp(inout packet_t<headers_t> pkt) {
+  ipv4_t dst_host_ip = vni_table[pkt.hdr.nvgre.vni][pkt.hdr.inner_ipv4.dst];
+  packet_t garp_pkt = clone(pkt, path_control=garp_pc);
+  garp_pkt.hdr.inner_ipv4.setInvalid(); // remove inner ipv4 hdr
+  garp_pkt.hdr.inner_arp.setValid();  // add inner arp hdr
+  swap(garp_pkt.hdr.eth.src, garp_pkt.hdr.eth.dst);
+  swap(garp_pkt.hdr.ipv4.src, garp_pkt.hdr.ipv4.dst);
+  garp_pkt.hdr.inner_arp.spa = dst_host_ip;
+  garp_pkt.hdr.inner_arp.tpa = pkt.hdr.ipv4.src;
+  garp_pkt.hdr.inner_arp.op = 2;
+}
+processing_block dec_ttl(inout packet_t<headers_t> pkt) {
+  assert(pkt.hdr.ipv4.ttl > 0);
+  pkt.hdr.ipv4.ttl--;
+}
+path_control garp_pc(inout packet_t<headers_t> pkt) {
+  pkt.egress_path = path_to_spine(pkt);
+  pkt.processing_rule='dec_ttl*';
+}
+
+path_control gci_pc(inout packet_t<headers_t> pkt) {
+  pkt.egress_path = path_to_spine(pkt);
+  pkt.processing_rule='do_garp & rewrite_dst & dec_ttl, dec_ttl*';
+}
+path_control gce_pc(inout packet_t<headers_t> pkt) {
+  if (!pkt.hdr.nvgre.isValid() || vni_table.contains(pkt.hdr.nvgre.vni)) {
+    return drop
+  } else {
+    path_object po = POB.from(pkt.ingestion)
+                    .to(vni_to_gw[pkt.hdr.nvgre.vni])
+                    .snapshot()
+                    .prioritize(p1, p2 => p1.length - p2.length)
+
+    pkt.egress_path = po;
+    pkt.processing_rule='dec_ttl*';
+  }
+}
+path_control slei_pc(inout packet_t<headers_t> pkt) {
+  if (!pkt.hdr.nvgre.isValid() || vni_table.contains(pkt.hdr.nvgre.vni) || !host_table.contains(pkt.hdr.ipv4.dst)) {
+    pkt.egress_path = drop;
+  } else {
+    bool system_traffic = system_ip_table.contains(pkt.hdr.ipv4.dst);
+    iff (vni_table[pkt.hdr.nvgre.vni].contains(pkt.hdr.inner.ipv4.dst)) {
+      swport_t dst = host_table[pkt.hdr.ipv4.dst]
+      path_object po = POB.from(pkt.ingestion)
+                        .waypoint(_ => {
+                          if (system_traffic) {
+                            return 'FW'
+                          } else {
+                            return null
+                          }
+                        })
+                        .to(dst)
+                        .filter(p => {
+                          if (system_traffic) {
+                            return p.links.every(l => l.bw >= 1g);
+                          } else {
+                            return true;
+                          }
+                        })
+                        .snapshot()
+                        .prioritize(p1, p2 => p1.length - p2.length)
+      pkt.egress_path = po;
+      pkt.processing_rule='dec_ttl*';
+    } else {
+      pkt.egress_path = drop;
+    }
+  }
+}
+threads {
+  ingestion='spineleaf_external_ingress', program='slei_pc';
+  ingestion='gw_cluster_external_ingress', program='gce_pc';
+  ingestion='gw_cluster_internal_ingress', program='gci_pc';
+}
+
+
+
+path_object path_to_spine(in packet_t<headers_t> pkt) {
+  iff (!pkt.hdr.nvgre.isValid() || vni_table.contains(pkt.hdr.nvgre.vni)) {
+    return drop
+  } else {
+    path_object po = POB.from(pkt.ingestion)
+                    .to(spines)
+                    .snapshot()
+                    .prioritize(p1, p2 => p1.length - p2.length)
+    return po
+  }
+}

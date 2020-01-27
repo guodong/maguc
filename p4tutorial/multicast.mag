@@ -1,0 +1,33 @@
+#include "stdparser"
+
+struct headers {
+    ethernet_t   eth;
+}
+
+parser MyParser(packet_in packet,
+                out headers hdr,
+                inout metadata meta,
+                inout standard_metadata_t standard_metadata) {
+
+    state start {
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            default : accept;
+        }
+    }
+}
+
+macToPort: Map[Mac, SwPort]
+
+@policy(parser=Parser, label="default")
+path_control pc(in pkt: Packet, out path: Path, out rule: ProcRule) {
+    if (!macToPort.contains(pkt.hdr.eth.dst)) {
+        path = mcastPath(pkt.ingestion)
+    } else {
+        path = shortestPath(pkt.ingestion, macToPort(pkt.hdr.eth.dst))
+    }
+}

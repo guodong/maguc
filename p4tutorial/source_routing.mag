@@ -1,0 +1,69 @@
+#include "stdparser"
+
+#define MAX_HOPS 9
+
+header srcRoute_t {
+    bit<1>    bos;
+    bit<15>   port;
+}
+
+struct headers {
+    ethernet_t              ethernet;
+    srcRoute_t[MAX_HOPS]    srcRoutes;
+    ipv4_t                  ipv4;
+}
+
+parser MyParser(packet_in packet,
+                out headers hdr,
+                inout metadata meta,
+                inout standard_metadata_t standard_metadata) {
+
+    state start {
+        transition parse_ethernet;
+    }
+
+    state parse_ethernet {
+        packet.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            TYPE_SRCROUTING: parse_srcRouting;
+            default: accept;
+        }
+    }
+
+    state parse_srcRouting {
+        packet.extract(hdr.srcRoutes.next);
+        transition select(hdr.srcRoutes.last.bos) {
+            1: parse_ipv4;
+            default: parse_srcRouting;
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition accept;
+    }
+
+}
+
+hostTable: Map[Ipv4, SwPort]
+
+ipToMac: Map[Ipv4, Mac]
+
+processing_rule decttl(inout pkt: Packet) {
+    pkt.hdr.ipv4.ttl--
+}
+
+processing_rule sr(inout pkt: Packet) {
+    val hdr = pkt.hdr
+    if (hdr.srcRoutes[0].bos == 1){
+        hdr.ethernet.etherType = TYPE_IPV4;
+    }
+    hdr.srcRoutes.pop_front(1);
+}
+
+@policy(parser=Parser, label="default")
+path_control pc(in pkt: Packet, out path: Path, out rule: ProcRule) {
+    pkt.hdr.eth.dst = ipToMac(pkt.hdr.ipv4.dst)
+    path = srPath(pkt.ingestion, hostTable(pkt.hdr.ipv4.dst))
+    rule = '(decttl & sr)*'
+}
